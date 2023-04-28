@@ -1023,6 +1023,38 @@ class ObjectSegmenting:
         return updated_image_path
 
 
+class ControlNetInpainting:
+
+    def __init__(self, device, cnet_path="lllyasviel/control_v11p_sd15_inpaint", model_path="runwayml/stable-diffusion-v1-5"):
+        self.device = device
+        self.revision = 'fp16' if 'cuda' in self.device else None
+        self.torch_dtype = torch.float16 if 'cuda' in self.device else torch.float32
+
+        self.controlnet = ControlNetModel.from_pretrained(cnet_path, torch_dtype=torch.float16)
+        self.inpaint = StableDiffusionControlNetPipeline.from_pretrained(
+            model_path, controlnet=self.controlnet, torch_dtype=torch.float16
+        ).to(device)
+        self.inpaint.scheduler = UniPCMultistepScheduler.from_config(self.inpaint.scheduler.config)
+
+    def make_inpaint_condition(self, image, image_mask):
+        image = np.array(image.convert("RGB")).astype(np.float16) / 255.0
+        image_mask = np.array(image_mask.convert("L"))
+        assert image.shape[0:1] == image_mask.shape[0:1], "image and image_mask must have the same image size"
+        image[image_mask > 128] = -1.0 # set as masked pixel 
+        image = np.expand_dims(image, 0).transpose(0, 3, 1, 2)
+        image = torch.from_numpy(image)
+        return image
+
+    def __call__(self, prompt, original_image, mask_image):
+        control_image = self.make_inpaint_condition(original_image.resize((512, 512)), mask_image.resize((512, 512)))
+        generator = torch.manual_seed(2)
+        prompt = "best quality," + prompt
+        negative_prompt="lowres, bad anatomy, bad hands, cropped, worst quality"
+        update_image = self.inpaint(prompt, negative_prompt=negative_prompt, num_inference_steps=30, 
+             generator=generator, image=control_image).images[0]
+        return update_image
+
+
 class ImageEditing:
     template_model = True
     def __init__(self, Text2Box:Text2Box, Segmenting:Segmenting, Inpainting:Inpainting):
